@@ -69,6 +69,27 @@ USING (
          CAST(SUM(CASE WHEN NOT has_history THEN 1 ELSE 0 END) AS BIGINT),
          SUM(CASE WHEN NOT has_history THEN 1 ELSE 0 END)=0
          FROM workshop_team_a_cba.gold.fct_wc2026_participants
+  -- dim_team_stats new columns
+  UNION ALL SELECT 'dim_team_stats','clean_sheets_not_exceed_matches','error',
+         CAST(SUM(CASE WHEN clean_sheets > matches_played THEN 1 ELSE 0 END) AS BIGINT),
+         SUM(CASE WHEN clean_sheets > matches_played THEN 1 ELSE 0 END)=0
+         FROM workshop_team_a_cba.gold.dim_team_stats
+  UNION ALL SELECT 'dim_team_stats','recent_form_in_range','error',
+         CAST(SUM(CASE WHEN recent_win_pct_last20 < 0 OR recent_win_pct_last20 > 1 THEN 1 ELSE 0 END) AS BIGINT),
+         SUM(CASE WHEN recent_win_pct_last20 < 0 OR recent_win_pct_last20 > 1 THEN 1 ELSE 0 END)=0
+         FROM workshop_team_a_cba.gold.dim_team_stats
+  -- dim_wc_team_edition
+  UNION ALL SELECT 'dim_wc_team_edition','pk_unique','error',
+         CAST(COUNT(*) AS BIGINT), COUNT(*)=COUNT(DISTINCT concat_ws('|', team, CAST(wc_year AS STRING)))
+         FROM workshop_team_a_cba.gold.dim_wc_team_edition
+  UNION ALL SELECT 'dim_wc_team_edition','wdl_sums_to_matches_played','error',
+         CAST(SUM(CASE WHEN wins+draws+losses <> matches_played THEN 1 ELSE 0 END) AS BIGINT),
+         SUM(CASE WHEN wins+draws+losses <> matches_played THEN 1 ELSE 0 END)=0
+         FROM workshop_team_a_cba.gold.dim_wc_team_edition
+  UNION ALL SELECT 'dim_wc_team_edition','reconciles_with_dim_team_stats_wc_matches','error',
+         CAST((SELECT SUM(matches_played) FROM workshop_team_a_cba.gold.dim_wc_team_edition) AS BIGINT),
+         (SELECT SUM(matches_played) FROM workshop_team_a_cba.gold.dim_wc_team_edition)
+         = (SELECT SUM(wc_matches_played) FROM workshop_team_a_cba.gold.dim_team_stats) AS passed
 ) AS src
 ON tgt.table_name = src.table_name AND tgt.rule = src.rule
 WHEN MATCHED THEN UPDATE SET

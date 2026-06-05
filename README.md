@@ -19,6 +19,7 @@ sql/
   05_gold_fct_wc_only.sql
   06_gold_dim_team_stats.sql
   07_gold_fct_wc2026_participants.sql
+  08_gold_dim_wc_team_edition.sql    # per-team per-WC-edition (Team B input)
 notebooks/
   silver_dq_checks.sql               # upserts silver._dq_results
   gold_dq_checks.sql                 # upserts gold._dq_results
@@ -30,7 +31,7 @@ de-pipeline-report-wc2026-20260605.md
 ```
 sql/00 → 01 → 02 → 03            # silver
 notebooks/silver_dq_checks.sql   # silver DQ
-sql/04 → 05 → 06 → 07            # gold
+sql/04 → 05 → 06 → 07 → 08       # gold
 notebooks/gold_dq_checks.sql     # gold DQ
 ```
 
@@ -89,16 +90,33 @@ Analytical tables for Teams B/C.
 | `fct_wc_only` | 868 | `match_id` | World Cup matches only |
 | `dim_team_stats` | 331 | `team` | per-team cumulative stats (played matches) |
 | `fct_wc2026_participants` | 48 | `team` | qualified teams ⟕ historical stats |
-| `_dq_results` | 11 rules | `(table_name, rule)` | DQ outcomes |
+| `dim_wc_team_edition` | 486 | `(team, wc_year)` | per-team per-WC-edition performance |
+| `_dq_results` | 16 rules | `(table_name, rule)` | DQ outcomes |
 
-**`dim_team_stats`** (built for a tournament simulator): `matches_played`,
+**`dim_team_stats`** (built for a tournament simulator / ranking): `matches_played`,
 `wins/draws/losses`, `win_pct`, `goals_for/against`, `goal_difference`,
-`avg_goals_for/against`, `first/last_match`, `wc_appearances`, `wc_matches_played`,
-`wc_wins`, `wc_win_pct`, `wc_goals_for/against`.
+`avg_goals_for/against`, `clean_sheets`, `clean_sheet_pct`, `recent_win_pct_last20`,
+`first/last_match`, `wc_appearances`, `wc_matches_played`, `wc_wins`, `wc_win_pct`,
+`wc_goals_for/against`, `wc_goal_difference`.
+
+### Team B enrichments (added as analytics input)
+
+To feed Team B's metrics layer (per `team_b_rubric.md`):
+- **`dim_wc_team_edition`** — per-team, per-edition WC performance (matches, W/D/L,
+  goals, goal diff) → supports "progression over editions" views.
+- **`dim_team_stats`** +4 cols: `clean_sheets`, `clean_sheet_pct`,
+  `recent_win_pct_last20` (form), `wc_goal_difference`.
+- **`fct_wc2026_participants`** surfaces `clean_sheet_pct`, `recent_win_pct_last20`,
+  `wc_goal_difference` → ranking-friendly comparable metrics for the 48 qualifiers.
+
+> **Not added — champions / finals / "best finish".** The source data is **incomplete
+> per edition** (e.g. 2022 has 49 of 64 matches; the 2006 Italy–France final is
+> missing) and has **no round labels**, so round/finish cannot be derived correctly.
+> `dim_wc_team_edition` exposes per-edition performance instead, without claiming finishes.
 
 ---
 
-## ✅ Data Quality — 23 checks, all passing
+## ✅ Data Quality — 28 checks, all passing
 
 **7 issues fixed in `bronze.results`:**
 
@@ -115,9 +133,11 @@ Analytical tables for Teams B/C.
 **Silver DQ (12):** row-count reconciliation, `match_id`/`goal_id` unique & non-null,
 `result` ∈ {W,D,L}, result-vs-score consistency, no pre-1930, fixture=48.
 
-**Gold DQ (11):** `fct` counts == Silver, `fct_wc_only` all-WC, `dim_team_stats`
-team-unique + W+D+L==matches_played + no negative goals + **cross-layer goals
-reconciliation**, participants==48 all matched.
+**Gold DQ (16):** `fct` counts == Silver, `fct_wc_only` all-WC, `dim_team_stats`
+team-unique + W+D+L==matches_played + no negative goals + clean_sheets≤matches +
+recent_form∈[0,1] + **cross-layer goals reconciliation**, participants==48 all matched,
+`dim_wc_team_edition` PK-unique + W+D+L==matches + **reconciles with dim_team_stats
+WC matches**.
 
 **Validation against reality:** Brazil 22 WC appearances, Argentina 18, Spain 16,
 Germany 20 — all correct. ✓
