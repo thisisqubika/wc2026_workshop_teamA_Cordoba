@@ -2,24 +2,24 @@
 -- Silver: silver_match_results   |  PK: match_id  |  Idempotent MERGE upsert
 -- ----------------------------------------------------------------------------
 -- One row per match (1930+). DQ fixes applied:
---   * dedupe 2,527 exact duplicate rows
+--   * casing fix via _team_name_map (e.g. "SPAIN"->"Spain") BEFORE dedup/former_names
+--   * dedupe exact + casing-duplicate rows
 --   * parse mixed date formats (yyyy-MM-dd + dd/MM/yyyy) -> 100% coverage
---   * non-numeric "NA" scores -> NULL (rows kept)
+--   * non-numeric "NA" scores -> NULL (rows kept, incl. unplayed 2026 fixtures)
 --   * neutral TRUE/FALSE strings -> boolean
 --   * filter pre-1930
 --   * team-name normalization via former_names (date-bounded)
---   * shootout enrichment from bronze.shootouts
--- Rerunnable: DDL is IF NOT EXISTS; data load is MERGE on match_id with
--- delete-on-source-miss, so repeated runs converge to the same state.
+--   * shootout enrichment from bronze.shootouts (also casing-normalized)
+-- Rerunnable: DDL IF NOT EXISTS; load is MERGE on match_id with delete-on-miss.
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS workshop_team_a_cba.silver.silver_match_results (
   match_id          STRING  COMMENT 'PK. sha2(date|home_team|away_team|tournament|home_score|away_score, 256).',
   date              DATE    COMMENT 'Match date. Parsed from mixed yyyy-MM-dd and dd/MM/yyyy source formats.',
-  home_team         STRING  COMMENT 'Home team, normalized to current name via former_names (date-bounded).',
-  away_team         STRING  COMMENT 'Away team, normalized to current name via former_names (date-bounded).',
-  home_score        INT     COMMENT 'Home goals. NULL where source had non-numeric "NA".',
-  away_score        INT     COMMENT 'Away goals. NULL where source had non-numeric "NA".',
+  home_team         STRING  COMMENT 'Home team, casing-fixed then normalized to current name via former_names.',
+  away_team         STRING  COMMENT 'Away team, casing-fixed then normalized to current name via former_names.',
+  home_score        INT     COMMENT 'Home goals. NULL where source had non-numeric "NA" or match unplayed.',
+  away_score        INT     COMMENT 'Away goals. NULL where source had non-numeric "NA" or match unplayed.',
   tournament_clean  STRING  COMMENT 'Trimmed tournament name.',
   city              STRING  COMMENT 'Host city.',
   country           STRING  COMMENT 'Host country.',
@@ -37,16 +37,27 @@ COMMENT 'Clean match results, one row per match (1930+). MERGE-upserted from bro
 
 MERGE INTO workshop_team_a_cba.silver.silver_match_results AS tgt
 USING (
-  WITH dedup AS (
-    SELECT DISTINCT date, home_team, away_team, home_score, away_score,
+  WITH mapped AS (
+    SELECT
+      r.date,
+      COALESCE(mh.canonical_name, trim(r.home_team)) AS home_team_c,
+      COALESCE(ma.canonical_name, trim(r.away_team)) AS away_team_c,
+      r.home_score, r.away_score, r.tournament, r.city, r.country, r.neutral
+    FROM workshop_team_a_cba.bronze.results r
+    LEFT JOIN workshop_team_a_cba.silver._team_name_map mh ON trim(r.home_team) = mh.raw_name
+    LEFT JOIN workshop_team_a_cba.silver._team_name_map ma ON trim(r.away_team) = ma.raw_name
+  ),
+  dedup AS (
+    -- collapses exact dupes AND casing-duplicate rows now that names are canonical
+    SELECT DISTINCT date, home_team_c, away_team_c, home_score, away_score,
                     tournament, city, country, neutral
-    FROM workshop_team_a_cba.bronze.results
+    FROM mapped
   ),
   parsed AS (
     SELECT
       COALESCE(try_to_date(date, 'yyyy-MM-dd'), try_to_date(date, 'dd/MM/yyyy')) AS date,
-      trim(home_team) AS home_team_raw,
-      trim(away_team) AS away_team_raw,
+      home_team_c AS home_team_raw,
+      away_team_c AS away_team_raw,
       try_cast(home_score AS INT) AS home_score,
       try_cast(away_score AS INT) AS away_score,
       trim(tournament) AS tournament_clean,
@@ -57,13 +68,24 @@ USING (
     FROM dedup
   ),
   filtered AS (SELECT * FROM parsed WHERE year(date) >= 1930),
+  -- casing-normalized shootouts for a clean join + winner
+  shootouts_c AS (
+    SELECT s.date,
+           COALESCE(mh.canonical_name, trim(s.home_team)) AS home_team_c,
+           COALESCE(ma.canonical_name, trim(s.away_team)) AS away_team_c,
+           COALESCE(mw.canonical_name, trim(s.winner))    AS winner_c
+    FROM workshop_team_a_cba.bronze.shootouts s
+    LEFT JOIN workshop_team_a_cba.silver._team_name_map mh ON trim(s.home_team) = mh.raw_name
+    LEFT JOIN workshop_team_a_cba.silver._team_name_map ma ON trim(s.away_team) = ma.raw_name
+    LEFT JOIN workshop_team_a_cba.silver._team_name_map mw ON trim(s.winner)    = mw.raw_name
+  ),
   with_shootout AS (
     SELECT f.*,
            CASE WHEN s.date IS NOT NULL THEN true ELSE false END AS had_shootout,
-           s.winner AS shootout_winner_raw
+           s.winner_c AS shootout_winner_raw
     FROM filtered f
-    LEFT JOIN workshop_team_a_cba.bronze.shootouts s
-      ON f.date = s.date AND f.home_team_raw = s.home_team AND f.away_team_raw = s.away_team
+    LEFT JOIN shootouts_c s
+      ON f.date = s.date AND f.home_team_raw = s.home_team_c AND f.away_team_raw = s.away_team_c
   ),
   norm AS (
     SELECT w.*,
